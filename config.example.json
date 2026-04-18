@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy to ~/.config/archive_marketing/config.json and fill in your values.",
+  "_docs": "https://github.com/rodrigoazlima/scripts-archive-marketing",
+
+  "inbox":           "imap://you%40gmail.com@imap.gmail.com/INBOX",
+  "archive_folder":  "imap://you%40gmail.com@imap.gmail.com/Marketing",
+
+  "page_size":    100,
+  "fetch_delay":  2.0,
+  "move_delay":   1.5,
+  "move_batch":   50,
+  "days_back":    3650,
+  "start_offset": 0,
+
+  "exclude": [
+    "boss@mycompany.com",
+    "payroll@mycompany.com"
+  ]
+}

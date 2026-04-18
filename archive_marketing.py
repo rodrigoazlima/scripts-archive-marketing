@@ -11,7 +11,8 @@ to a designated archive folder.
 Classification uses a weighted scoring system:
   - Strong signal  (known marketing platform/domain) → always archive
   - Subject match  (promotional keyword)             → always archive
-  - Weak signals   (noreply sender, engagement words) combined → archive
+  - Weak signals   (noreply sender + engagement subject combined) → archive
+  - Exclude list   (user-defined allowlist patterns) → always keep
   - Safe allowlist (security/account alerts)         → always keep
 
 Requirements:
@@ -19,21 +20,31 @@ Requirements:
     https://github.com/joelpurra/thunderbird-mcp
   - Python 3.8+  (stdlib only — no pip installs needed)
 
+Configuration priority (highest → lowest):
+  1. CLI flags
+  2. Environment variables  (ARCHIVE_INBOX, ARCHIVE_FOLDER, …)
+  3. Config file            (--config path, or ~/.config/archive_marketing/config.json)
+  4. Built-in defaults
+
 Usage:
   python archive_marketing.py [options]
 
-See README.md for full setup instructions.
+See README.md for full setup and troubleshooting instructions.
 """
 
 import argparse
+import csv
 import json
 import os
 import re
+import stat
 import sys
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 # Force UTF-8 stdout/stderr on Windows (handles emoji in folder paths/subjects)
 if hasattr(sys.stdout, "reconfigure"):
@@ -41,46 +52,50 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+__version__ = "1.1.0"
 
 # ---------------------------------------------------------------------------
-# Default configuration — override via CLI flags
+# Default configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_CONNECTION_FILE = str(
-    Path(os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp")))
-    / "thunderbird-mcp" / "connection.json"
-)
+_TEMP = os.environ.get("TEMP", os.environ.get("TMPDIR", "/tmp"))
 
-DEFAULT_INBOX = "imap://you%40gmail.com@imap.gmail.com/INBOX"
-DEFAULT_ARCHIVE_FOLDER = "imap://you%40gmail.com@imap.gmail.com/Marketing"
+DEFAULTS: Dict = {
+    "inbox":           "imap://you%40gmail.com@imap.gmail.com/INBOX",
+    "archive_folder":  "imap://you%40gmail.com@imap.gmail.com/Marketing",
+    "connection_file": str(Path(_TEMP) / "thunderbird-mcp" / "connection.json"),
+    "page_size":       100,
+    "fetch_delay":     2.0,
+    "move_delay":      1.5,
+    "move_batch":      50,
+    "start_offset":    0,
+    "days_back":       3650,
+    "dry_run":         False,
+    "verbose":         False,
+    "dry_run_summary": False,
+    "export_csv":      None,
+    "exclude":         [],
+}
 
-DEFAULT_PAGE_SIZE    = 100
-DEFAULT_FETCH_DELAY  = 2.0
-DEFAULT_MOVE_DELAY   = 1.5
-DEFAULT_MOVE_BATCH   = 50
-DEFAULT_START_OFFSET = 0
-DEFAULT_DAYS_BACK    = 3650
-
+DEFAULT_CONFIG_PATH = Path.home() / ".config" / "archive_marketing" / "config.json"
 
 # ---------------------------------------------------------------------------
 # SAFE SENDERS — always kept regardless of subject
-# Security alerts, account notifications from trusted providers.
 # ---------------------------------------------------------------------------
 
 SAFE_SENDER = re.compile(r"""
-    no-reply@accounts\.google\.com      |   # Google account security
-    noreply@google\.com                 |   # Google notifications
-    security@.*\.google\.com            |   # Google security
-    no-reply@.*\.apple\.com             |   # Apple security
-    security-noreply@.*\.amazon\.com    |   # Amazon security
-    account-security-noreply@.*         |   # Generic account security
-    noreply@github\.com                 |   # GitHub device/security alerts
+    no-reply@accounts\.google\.com      |
+    noreply@google\.com                 |
+    security@.*\.google\.com            |
+    no-reply@.*\.apple\.com             |
+    security-noreply@.*\.amazon\.com    |
+    account-security-noreply@.*         |
+    noreply@github\.com                 |
     no-reply@github\.com
 """, re.IGNORECASE | re.VERBOSE)
 
 # ---------------------------------------------------------------------------
 # STRONG SENDER SIGNALS — definite marketing platforms & domains
-# Match on any part of the From address.
 # ---------------------------------------------------------------------------
 
 MARKETING_SENDER_STRONG = re.compile(r"""
@@ -112,11 +127,10 @@ MARKETING_SENDER_STRONG = re.compile(r"""
     sparkpostmail\.com      |
     createsend\.com         |
     emailoctopus\.com       |
-    mailer-daemon@          |
     em\..*amazonses\.com    |
-    xt\.local               |   # Twilio SendGrid
+    xt\.local               |
 
-    # ── E-commerce (BR + Global) ───────────────────────────────────────────
+    # ── E-commerce ────────────────────────────────────────────────────────
     aliexpress      | ae-best | newarrival\.aliexpress | deals\.aliexpress |
     mercadolivre    | mercadolibre |
     shopee          |
@@ -128,7 +142,7 @@ MARKETING_SENDER_STRONG = re.compile(r"""
     zara\.          | hm\.com |
     carrefour       | kabum | pichau |
 
-    # ── Travel & Hospitality ───────────────────────────────────────────────
+    # ── Travel ────────────────────────────────────────────────────────────
     emails\.decolar\.com | decolar\. |
     booking\.com    |
     airbnb\.com     |
@@ -145,14 +159,12 @@ MARKETING_SENDER_STRONG = re.compile(r"""
     doordash\.       |
     deliverymuch\.  |
 
-    # ── Finance marketing (promotional, not transactional) ─────────────────
+    # ── Finance marketing ──────────────────────────────────────────────────
     promotion@pan\.com\.vc | pan\.com\.vc |
     comunicacao\.serasaexperian |
     99pay@99app | 99app\.com |
-    nubank\.com\.br.*marketing |
-    c6bank\.com\.br.*promo |
 
-    # ── Job boards (mass mailings) ─────────────────────────────────────────
+    # ── Job boards ────────────────────────────────────────────────────────
     jobalert        | jobnotification |
     indeed\.com     |
     glassdoor\.      |
@@ -189,7 +201,7 @@ MARKETING_SENDER_STRONG = re.compile(r"""
     mail\.perplexity\.ai |
     signalrgb\.com  |
 
-    # ── Social media notifications / digests ───────────────────────────────
+    # ── Social media digests ───────────────────────────────────────────────
     facebookmail\.com |
     notification.*instagram |
     mailer\.twitter\.com | twitteremail\.com |
@@ -199,7 +211,7 @@ MARKETING_SENDER_STRONG = re.compile(r"""
 
     # ── Gaming ────────────────────────────────────────────────────────────
     epicgames\.com  | email\.epicgames\.com | acct\.epicgames\.com |
-    steampowered\.com | store\.steampowered |
+    steampowered\.com |
     playstation\.com |
     xbox\.com        |
     blizzard\.com   |
@@ -210,7 +222,7 @@ MARKETING_SENDER_STRONG = re.compile(r"""
     netflix\.com    |
     spotify\.com    | sptfy\.com |
     disneyplus\.com |
-    hbomax\.com     | max\.com |
+    hbomax\.com     |
     primevideo\.amazon |
 
     # ── Crypto ────────────────────────────────────────────────────────────
@@ -221,12 +233,12 @@ MARKETING_SENDER_STRONG = re.compile(r"""
     coinmarketcap\. |
     crypto\.com     |
 
-    # ── Travel & Experiences ──────────────────────────────────────────────
+    # ── Events ────────────────────────────────────────────────────────────
     komoot\.         |
     eventbrite\.    |
     sympla\.com\.br |
 
-    # ── Miscellaneous known senders ───────────────────────────────────────
+    # ── Generic marketing patterns ─────────────────────────────────────────
     mailgun\.patreon\.com |
     promotion@      |
     promo@          |
@@ -238,16 +250,13 @@ MARKETING_SENDER_STRONG = re.compile(r"""
     updates@        |
     offers@         |
     deals@          |
-    alerts@.*shop   |
     digest@         |
-    email@.*shop    |
-    hello@.*\.(io|ai|co|app)   # Generic SaaS "hello@" senders
+    hello@.*\.(io|ai|co|app)
 
 """, re.IGNORECASE | re.VERBOSE)
 
 # ---------------------------------------------------------------------------
 # MARKETING SUBJECT KEYWORDS
-# Matches promotional language in any supported language.
 # ---------------------------------------------------------------------------
 
 MARKETING_SUBJECT = re.compile(r"""
@@ -256,115 +265,102 @@ MARKETING_SUBJECT = re.compile(r"""
     \bdesconto\b    | \bdescontos\b |
     \boferta\b      | \bofertas\b   |
     promo[çc][ãa]   | promoc        |
-    liquida[çc][ãa] | \bliqui\b     |
+    liquida[çc][ãa] |
     \bsale\b        | \bsales\b     |
     \bdeal\b        | \bdeals\b     |
     \d+\s*%\s*off   |
-    \boff\b.*\bprice |
     \bcupom\b       | \bcoupon\b    | \bvoucher\b   | \bpromo\s*code\b |
     \bcashback\b    |
     \bbon[uú]s\b    |
     frete\s*gr[áa]tis | free\s+shipping | envio\s+gr[áa]tis |
     \bgratuito\b    | \bgratis\b    | \bfor\s+free\b |
-    \bsem\s+juros\b | \bparcelado\b | sem\s+acr[eé]scimo |
-    \bcr[eé]dito\b.*\bexclusivo\b   |
+    \bsem\s+juros\b | \bparcelado\b |
     \bblack\s+friday\b | \bcyber\s+monday\b | \bprime\s+day\b |
-    \bmega\s+sale\b | \bflash\s+sale\b | \bflash\s+deal\b |
-    \bsummer\s+sale\b | \bwinter\s+sale\b |
-    \blimited\s+time\b | \btime.sensitive\b |
-    \bexpires?\s+(today|soon|tonight|in \d+)\b |
+    \bmega\s+sale\b | \bflash\s+sale\b |
+    \blimited\s+time\b |
     \bhurry\b       | \bact\s+now\b | \blast\s+chance\b |
     [úu]ltima\s+chance | n[ãa]o\s+perca | imperd[íi]vel |
-    \bdon.t\s+miss\b | \bmissing\s+out\b | \bfomo\b |
+    \bdon.t\s+miss\b |
     \bexclusive\s+(offer|deal|access|discount)\b |
-    \bmembers?\s+only\b | \bvip\s+(offer|access|deal)\b |
+    \bmembers?\s+only\b |
     aproveite\b     | economize\b   | \bganhe\b     |
     super\s+oferta  | queima\s+(de\s+)?estoque |
     at[eé]\s+\d+.*\boff\b |
 
-    # ── Newsletter / content marketing ────────────────────────────────────
+    # ── Newsletter / content ──────────────────────────────────────────────
     \bnewsletter\b  |
     \bdigest\b      |
-    \bweekly\b      | \bmonthly\b   | \bdaily\s+update\b |
+    \bweekly\b      | \bmonthly\b   |
     \broundup\b     | \brecap\b     | \bhighlights\b |
-    \btop\s+stories\b | \bthis\s+week\s+in\b | \bthis\s+month\s+in\b |
+    \btop\s+stories\b |
     what.?s\s+(new|happening|hot) |
-    \bcurious\b.*\bweek\b | \binside\s+the\b |
 
-    # ── Product announcements ─────────────────────────────────────────────
+    # ── Announcements ─────────────────────────────────────────────────────
     \bannouncing\b  | \bannouncement\b |
-    \bintroducing\b | \bwe.re\s+(launching|releasing|shipping)\b |
-    \bwe.re\s+excited\s+to\b | \bexcited\s+to\s+(share|announce|introduce)\b |
+    \bintroducing\b |
+    \bwe.re\s+(launching|releasing|shipping)\b |
+    \bwe.re\s+excited\s+to\b |
     \bjust\s+launched\b | \bnow\s+live\b | \bnow\s+available\b |
-    \bcoming\s+soon\b   | \bsneek\s+peek\b | \bpreview\b |
+    \bcoming\s+soon\b   |
     \bchangelog\b   | \brelease\s+notes\b | \bproduct\s+update\b |
-    \bnew\s+feature\b | \bnew\s+in\b.*\d{4} | \bwhat.?s\s+new\s+in\b |
+    \bnew\s+feature\b |
 
     # ── Engagement / re-engagement ────────────────────────────────────────
-    \bwe\s+miss\s+you\b | \bcome\s+back\b | \bwe.ve\s+been\s+thinking\b |
-    \bstill\s+interested\b | \bare\s+you\s+still\b |
+    \bwe\s+miss\s+you\b | \bcome\s+back\b |
     \btrial\s*(has\s*)?(ended|expired)\b | \byour\s+trial\b |
     \bjoin\s+(the\s+)?(community|waitlist|beta)\b |
-    \bget\s+started\b | \bget\s+access\b | \bget\s+early\s+access\b |
-    \bstart\s+your\b.*\bfree\b |
-    \bupgrade\s+(your|to)\b | \bunlock\b.*\bfeature\b |
+    \bget\s+started\b | \bget\s+early\s+access\b |
+    \bupgrade\s+(your|to)\b |
 
     # ── Giveaway / contest ────────────────────────────────────────────────
-    \bgiveaway\b    | \bcontest\b   | \braffle\b    | \bwin\s+(a|an|free)\b |
-    \byou.ve\s+(won|been\s+selected|been\s+chosen)\b |
-    feeling\s+lucky | \blucky\s+draw\b |
+    \bgiveaway\b    | \bcontest\b   | \braffle\b    |
+    \bwin\s+(a|an|free)\b |
+    feeling\s+lucky |
 
-    # ── Educational content marketing ─────────────────────────────────────
+    # ── Content marketing ─────────────────────────────────────────────────
     \bfree\s+(ebook|guide|webinar|workshop|course|template|checklist|toolkit|whitepaper)\b |
     \bdownload\s+(your|our|the|free)\b |
-    \blearn\s+how\s+to\b | \btips\s+(to|for|on)\b | \btricks\s+(to|for)\b |
+    \btips\s+(to|for|on)\b |
     \bhow\s+to\s+(boost|improve|grow|scale|double|triple)\b |
-    \bcase\s+study\b | \bsuccess\s+story\b |
 
-    # ── Unsubscribe / email management language ───────────────────────────
-    \bunsubscribe\b | \bemail\s+preferences\b | \bmanage\s+(your\s+)?subscription\b |
-    \bview\s+(in|this)\s+(browser|email)\b | \bopt.out\b |
+    # ── Unsubscribe signals ───────────────────────────────────────────────
+    \bunsubscribe\b | \bemail\s+preferences\b |
+    \bmanage\s+(your\s+)?subscription\b |
+    \bopt.out\b     |
 
     # ── Job board spam ────────────────────────────────────────────────────
-    \bjobs?\s+for\s+you\b | \brecommended\s+jobs?\b | \bnew\s+jobs?\s+(near|for|match)\b |
-    \bjob\s+alert\b | \bcareer\s+opportunit\b |
-    top\s+vagas | vagas\s+para\s+voc[eê] | \bvaga\s+em\b |
-    talent\s+pool | \bwe.re\s+hiring\b | \bjoin\s+our\s+team\b |
+    \bjobs?\s+for\s+you\b | \brecommended\s+jobs?\b |
+    \bjob\s+alert\b |
+    top\s+vagas | vagas\s+para\s+voc[eê] |
+    talent\s+pool | \bwe.re\s+hiring\b |
 
-    # ── PT-BR promotional language ────────────────────────────────────────
+    # ── PT-BR promotional ─────────────────────────────────────────────────
     incrível        | imperd[íi]vel | olha\s+(isso|s[oó]) |
-    n[ãa]o\s+perca  | n[ãa]o\s+perd[ao] | confira\s+(já|agora|isso) |
+    n[ãa]o\s+perca  | confira\s+(já|agora|isso) |
     melhore\s+sua\s+vida | organize\s+suas\s+finan[çc]as |
-    sem\s+complicar | sua\s+vida\s+financeira |
+    sem\s+complicar |
     novidade\b      | lan[çc]amento | aproveite | conquiste |
-    assine\s+(j[aá]|agora|nosso) | assine\s+e\s+(ganhe|economize) |
+    assine\s+(j[aá]|agora|nosso) |
     mega\s+promo    | app\s+days   | madrugol  | fds\s+azul |
     voos\s+a\s+partir | pacotes\s+com | hot[eé]is\s+e\s+pacotes |
-    kit\s+de\s+ferramentas | kit.*criativo |
     cart[ãa]o.*esperando | esperando.*por\s+voc[eê] |
-    [úu]ltima\s+oportunidade |
 
     # ── Travel promotional ────────────────────────────────────────────────
     \bvoos?\b.*\boff\b | \bpassagens?\b.*\bdesconto |
-    \bhotel\b.*\boff\b | \bpacote\b.*\bdesconto |
     fim\s+de\s+semana.*oferta |
 
-    # ── SaaS / product onboarding (automated sequences) ───────────────────
-    welcome\s+to\s+(the\s+)?\w+  |   # "Welcome to Acme"
+    # ── SaaS onboarding sequences ──────────────────────────────────────────
+    welcome\s+to\s+(the\s+)?\w+  |
     create\s+an?\s+instance       |
-    get\s+started\s+with          |
-    your\s+account\s+is\s+ready   |
     complete\s+your\s+(setup|profile|registration) |
-    \d+\s+(tip|trick|step)s?\s+(to|for|that) |   # "5 tips to..."
     import\s+figma                |
-    desktop\s+redesign            | routines.*ultrareview |
-    hermes.*agent | support.*hermes
+    desktop\s+redesign            |
+    hermes.*agent
 
 """, re.IGNORECASE | re.VERBOSE)
 
 # ---------------------------------------------------------------------------
-# WEAK SIGNALS — individually insufficient, but combined they tip the scale.
-# A noreply sender + any weak subject = marketing.
+# WEAK SIGNALS — individually insufficient; noreply + weak subject → archive
 # ---------------------------------------------------------------------------
 
 NOREPLY_SENDER = re.compile(
@@ -374,42 +370,171 @@ NOREPLY_SENDER = re.compile(
 
 WEAK_SUBJECT = re.compile(r"""
     \btips?\b       | \bguide\b    | \binsights?\b |
-    \bupdate[sd]?\b | \breminder\b | \binvitation\b |
+    \bupdate[sd]?\b | \breminder\b |
     \bannounce\b    | \bannounced\b | \bannouncing\b |
     \bwelcome\b     | \bonboard\b  |
     \bthis\s+week\b | \bthis\s+month\b |
     \bpopular\b     | \btrending\b | \bfeatured\b |
-    \bexclusive\b   | \bspecial\b.*\bfor\s+you\b |
     \bdiscover\b    | \bexplore\b  |
     fastest\s+way   | popular\s+ways | next\s+answer
 """, re.IGNORECASE | re.VERBOSE)
+
 
 # ---------------------------------------------------------------------------
 # Classification engine
 # ---------------------------------------------------------------------------
 
-def classify(sender: str, subject: str) -> tuple[bool, str]:
+def classify(
+    sender: str,
+    subject: str,
+    exclude_patterns: Optional[List[re.Pattern]] = None,
+) -> Tuple[bool, str]:
     """
-    Returns (is_marketing, reason).
-    Reason is a short string for verbose logging.
+    Classify an email as marketing or legitimate.
+
+    Evaluation order (first match wins):
+      1. User exclude list   → always keep
+      2. Safe-sender allowlist → always keep
+      3. Strong sender match → always archive
+      4. Marketing subject   → always archive
+      5. noreply + weak subject → archive
+      6. Default → keep
+
+    Args:
+        sender:           Full From address string (e.g. "Acme <news@acme.com>").
+        subject:          Subject line of the email.
+        exclude_patterns: Optional list of compiled regex patterns; matching
+                          emails are always kept regardless of other signals.
+
+    Returns:
+        Tuple of (is_marketing: bool, reason: str).
+        ``reason`` is a short label useful for logging and CSV export.
     """
-    # 1. Safe allowlist always wins
+    # 1. User-defined exclude list (explicit keep)
+    if exclude_patterns:
+        for pat in exclude_patterns:
+            if pat.search(sender) or pat.search(subject):
+                return False, "user-exclude"
+
+    # 2. Safe allowlist
     if SAFE_SENDER.search(sender):
         return False, "safe-allowlist"
 
-    # 2. Strong sender match → definite marketing
+    # 3. Strong sender → definite marketing
     if MARKETING_SENDER_STRONG.search(sender):
         return True, "sender:strong"
 
-    # 3. Marketing subject → definite marketing
+    # 4. Marketing subject
     if MARKETING_SUBJECT.search(subject):
         return True, "subject:match"
 
-    # 4. Weak combo: noreply sender + weak engagement subject
+    # 5. Weak combo: noreply + engagement subject
     if NOREPLY_SENDER.search(sender) and WEAK_SUBJECT.search(subject):
         return True, "sender:noreply+subject:weak"
 
     return False, "keep"
+
+
+# ---------------------------------------------------------------------------
+# Configuration loader
+# ---------------------------------------------------------------------------
+
+def load_config(path: Optional[str]) -> Dict:
+    """
+    Load settings from a JSON config file.
+
+    Args:
+        path: Explicit path to config file, or None to try the default location.
+
+    Returns:
+        Dict of settings (only keys present in the file; missing keys are
+        filled later from env vars and CLI defaults).
+    """
+    search = [path] if path else [str(DEFAULT_CONFIG_PATH)]
+    for p in search:
+        try:
+            with open(p, encoding="utf-8") as f:
+                data = json.load(f)
+            print(f"[config] Loaded from {p}", flush=True)
+            return data
+        except FileNotFoundError:
+            pass
+        except json.JSONDecodeError as e:
+            sys.exit(f"[ERROR] Config file is not valid JSON: {p}\n  {e}")
+    return {}
+
+
+def merge_config(cli_args: argparse.Namespace, file_cfg: Dict) -> argparse.Namespace:
+    """
+    Apply config file and environment variable values for any CLI option that
+    was not explicitly set by the user (i.e. still at its argparse default).
+
+    Priority: CLI > env var > config file > built-in default.
+
+    Args:
+        cli_args: Parsed argparse namespace.
+        file_cfg: Dict loaded from the JSON config file.
+
+    Returns:
+        Updated argparse namespace.
+    """
+    ENV_MAP = {
+        "inbox":           "ARCHIVE_INBOX",
+        "archive_folder":  "ARCHIVE_FOLDER",
+        "connection_file": "ARCHIVE_CONNECTION_FILE",
+        "page_size":       "ARCHIVE_PAGE_SIZE",
+        "fetch_delay":     "ARCHIVE_FETCH_DELAY",
+        "move_delay":      "ARCHIVE_MOVE_DELAY",
+        "start_offset":    "ARCHIVE_START_OFFSET",
+        "days_back":       "ARCHIVE_DAYS_BACK",
+    }
+
+    for attr, env_key in ENV_MAP.items():
+        default_val = DEFAULTS.get(attr)
+        if getattr(cli_args, attr, None) == default_val:
+            if env_key in os.environ:
+                raw = os.environ[env_key]
+                # Cast to correct type
+                if isinstance(default_val, int):
+                    raw = int(raw)
+                elif isinstance(default_val, float):
+                    raw = float(raw)
+                setattr(cli_args, attr, raw)
+            elif attr in file_cfg:
+                setattr(cli_args, attr, file_cfg[attr])
+
+    # exclude list: merge CLI + file
+    file_excl = file_cfg.get("exclude", [])
+    cli_excl  = getattr(cli_args, "exclude", []) or []
+    combined  = list(set(file_excl + cli_excl))
+    cli_args.exclude = combined
+
+    return cli_args
+
+
+# ---------------------------------------------------------------------------
+# Security: connection file validation
+# ---------------------------------------------------------------------------
+
+def validate_connection_file(path: str) -> None:
+    """
+    Warn if the thunderbird-mcp connection file has world-readable permissions.
+    On Windows, permission checks are best-effort only.
+
+    Args:
+        path: Filesystem path to the connection.json file.
+    """
+    try:
+        mode = os.stat(path).st_mode
+        # On POSIX: warn if group or other can read (should be 600)
+        if os.name != "nt" and (mode & (stat.S_IRGRP | stat.S_IROTH)):
+            print(
+                f"[WARN] Connection file has permissive permissions: {oct(mode & 0o777)}\n"
+                f"       Run: chmod 600 {path}",
+                flush=True,
+            )
+    except OSError:
+        pass  # Non-critical check
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +543,24 @@ def classify(sender: str, subject: str) -> tuple[bool, str]:
 
 _req_id = 0
 
-def _mcp_call(token: str, port: int, tool_name: str, arguments: dict) -> object:
+
+def _mcp_call(token: str, port: int, tool_name: str, arguments: Dict) -> object:
+    """
+    Send a single MCP tools/call request to the Thunderbird HTTP bridge.
+
+    Args:
+        token:      Bearer auth token from connection.json.
+        port:       TCP port the Thunderbird extension is listening on.
+        tool_name:  MCP tool name (e.g. "getRecentMessages").
+        arguments:  Tool arguments dict.
+
+    Returns:
+        Parsed JSON result from the MCP response envelope.
+
+    Raises:
+        RuntimeError: If the response has an unexpected shape.
+        urllib.error.URLError: On network errors (caller handles retries).
+    """
     global _req_id
     _req_id += 1
 
@@ -442,34 +584,78 @@ def _mcp_call(token: str, port: int, tool_name: str, arguments: dict) -> object:
     with urllib.request.urlopen(req, timeout=30) as resp:
         raw = json.loads(resp.read())
 
+    if raw.get("error"):
+        code = raw["error"].get("code", "?")
+        msg  = raw["error"].get("message", "unknown error")
+        raise RuntimeError(f"MCP error {code}: {msg}")
+
     content = raw.get("result", {}).get("content", [])
     if content and content[0].get("type") == "text":
         return json.loads(content[0]["text"])
 
-    raise RuntimeError(f"Unexpected MCP response: {raw}")
+    raise RuntimeError("Unexpected MCP response shape")
 
 
-def load_connection(connection_file: str) -> tuple[str, int]:
+def load_connection(connection_file: str) -> Tuple[str, int]:
+    """
+    Read the Thunderbird MCP auth token and port from the connection file.
+
+    Args:
+        connection_file: Path to the thunderbird-mcp connection.json.
+
+    Returns:
+        Tuple of (token, port).  Exits with an informative message on failure.
+    """
     try:
         with open(connection_file, encoding="utf-8") as f:
             data = json.load(f)
-        return data["token"], data["port"]
+        token = data["token"]
+        port  = data["port"]
     except FileNotFoundError:
         sys.exit(
             f"\n[ERROR] Connection file not found:\n  {connection_file}\n\n"
-            "Make sure Thunderbird is running and the thunderbird-mcp extension is active.\n"
-            "See: https://github.com/rodrigoazlima/scripts-archive-marketing\n"
+            "Checklist:\n"
+            "  1. Is Thunderbird running?\n"
+            "  2. Is the thunderbird-mcp extension installed and enabled?\n"
+            "  3. Does the extension show 'Connected' in Thunderbird add-ons?\n\n"
+            "See: https://github.com/rodrigoazlima/scripts-archive-marketing#prerequisites\n"
         )
     except KeyError as e:
         sys.exit(f"\n[ERROR] Malformed connection file — missing key: {e}\n")
+    except json.JSONDecodeError:
+        sys.exit(f"\n[ERROR] Connection file is not valid JSON: {connection_file}\n")
+
+    validate_connection_file(connection_file)
+    return token, port
 
 
-def fetch_page(token, port, inbox, offset, page_size, days_back) -> tuple[list, int]:
+def fetch_page(
+    token: str,
+    port: int,
+    inbox: str,
+    offset: int,
+    page_size: int,
+    days_back: int,
+) -> Tuple[List[Dict], int]:
+    """
+    Fetch one page of inbox messages.
+
+    Args:
+        token:     Auth token.
+        port:      MCP bridge port.
+        inbox:     IMAP folder URI.
+        offset:    Number of messages to skip (for pagination).
+        page_size: Max messages to return.
+        days_back: Only return messages newer than this many days.
+
+    Returns:
+        Tuple of (emails list, total_count).
+    """
     result = _mcp_call(token, port, "getRecentMessages", {
         "folderPath": inbox,
-        "maxResults": page_size,
-        "offset": offset,
-        "daysBack": days_back,
+        "maxResults":  page_size,
+        "offset":      offset,
+        "daysBack":    days_back,
     })
     if isinstance(result, dict) and "messages" in result:
         return result["messages"], result.get("totalMatches", 0)
@@ -478,125 +664,227 @@ def fetch_page(token, port, inbox, offset, page_size, days_back) -> tuple[list, 
     return [], 0
 
 
-def move_emails(token, port, inbox, message_ids: list, destination: str) -> int:
+def move_emails(
+    token: str,
+    port: int,
+    inbox: str,
+    message_ids: List[str],
+    destination: str,
+) -> int:
+    """
+    Move a list of messages to the destination folder.
+
+    Args:
+        token:       Auth token.
+        port:        MCP bridge port.
+        inbox:       Source IMAP folder URI.
+        message_ids: List of message IDs to move.
+        destination: Destination IMAP folder URI.
+
+    Returns:
+        Number of messages successfully moved.
+    """
     result = _mcp_call(token, port, "updateMessage", {
         "folderPath": inbox,
         "messageIds": message_ids,
-        "moveTo": destination,
+        "moveTo":     destination,
     })
     return result.get("updated", len(message_ids))
+
+
+# ---------------------------------------------------------------------------
+# CSV export
+# ---------------------------------------------------------------------------
+
+def open_csv_writer(path: str):
+    """
+    Open a CSV file for writing classification results.
+
+    Args:
+        path: Output file path.
+
+    Returns:
+        Tuple of (file handle, csv.DictWriter).
+    """
+    fh = open(path, "w", newline="", encoding="utf-8")
+    writer = csv.DictWriter(fh, fieldnames=["timestamp", "sender", "subject", "is_marketing", "reason"])
+    writer.writeheader()
+    return fh, writer
 
 
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
-def run(args):
+def run(args: argparse.Namespace) -> None:
+    """
+    Main entry point: paginate inbox, classify, and archive marketing emails.
+
+    Args:
+        args: Merged configuration namespace (CLI + env + config file).
+    """
     token, port = load_connection(args.connection_file)
 
+    # Compile user exclude patterns
+    exclude_patterns: List[re.Pattern] = []
+    for pat in (args.exclude or []):
+        try:
+            exclude_patterns.append(re.compile(pat, re.IGNORECASE))
+        except re.error as e:
+            print(f"[WARN] Invalid exclude pattern '{pat}': {e}", flush=True)
+
+    # CSV export setup
+    csv_fh, csv_writer = None, None
+    if args.export_csv:
+        try:
+            csv_fh, csv_writer = open_csv_writer(args.export_csv)
+            print(f"[export] Writing classifications to: {args.export_csv}", flush=True)
+        except OSError as e:
+            print(f"[WARN] Cannot open CSV export file: {e}", flush=True)
+
     total_archived = 0
-    total_kept = 0
-    reason_counts: dict[str, int] = {}
-    offset = args.start_offset
+    total_kept     = 0
+    reason_counts: Dict[str, int] = {}
+    offset   = args.start_offset
     page_num = 0
 
     mode = "[DRY RUN] " if args.dry_run else ""
-    print(f"\n{'='*62}")
-    print(f"  {mode}Thunderbird Inbox Marketing Archiver")
-    print(f"  https://github.com/rodrigoazlima/scripts-archive-marketing")
-    print(f"{'='*62}")
-    print(f"  Inbox  : {args.inbox}")
-    print(f"  Archive: {args.archive_folder}")
-    print(f"  Offset : {offset}  |  Page: {args.page_size}  |  Delay: {args.fetch_delay}s")
-    print(f"{'='*62}\n")
+    if not args.dry_run_summary:
+        print(f"\n{'='*62}")
+        print(f"  {mode}Thunderbird Inbox Marketing Archiver  v{__version__}")
+        print(f"  https://github.com/rodrigoazlima/scripts-archive-marketing")
+        print(f"{'='*62}")
+        print(f"  Inbox  : {args.inbox}")
+        print(f"  Archive: {args.archive_folder}")
+        print(f"  Offset : {offset}  |  Page: {args.page_size}  |  Delay: {args.fetch_delay}s")
+        if exclude_patterns:
+            print(f"  Exclude: {len(exclude_patterns)} pattern(s)")
+        print(f"{'='*62}\n")
 
-    while True:
-        page_num += 1
-        print(f"[Page {page_num:>3}] offset={offset:<6}", end=" ... ", flush=True)
+    try:
+        while True:
+            page_num += 1
+            if not args.dry_run_summary:
+                print(f"[Page {page_num:>3}] offset={offset:<6}", end=" ... ", flush=True)
 
-        emails, total = [], 0
-        for attempt in range(3):
-            try:
-                emails, total = fetch_page(
-                    token, port, args.inbox, offset, args.page_size, args.days_back
-                )
-                break
-            except Exception as exc:
-                if attempt == 2:
-                    print(f"\n[ERROR] Failed after 3 attempts: {exc}\nStopping.")
-                    _print_summary(total_archived, total_kept, reason_counts, args.dry_run)
-                    return
-                wait = 10 * (attempt + 1)
-                print(f"\n  Retry {attempt+1}/3 in {wait}s ({exc}) ...", end=" ", flush=True)
-                time.sleep(wait)
-
-        print(f"fetched {len(emails):<4}  (inbox total: ~{total})", flush=True)
-
-        if not emails:
-            print("  No more emails. Done!\n")
-            break
-
-        marketing_ids = []
-        for email in emails:
-            sender  = email.get("author", "")
-            subject = email.get("subject", "")
-            mid     = email.get("id", "")
-
-            is_mkt, reason = classify(sender, subject)
-            reason_counts[reason] = reason_counts.get(reason, 0) + 1
-
-            if is_mkt:
-                marketing_ids.append(mid)
-                if args.verbose:
-                    print(f"    ✗ [{reason:<30}] {sender[:40]:<40}  {subject[:45]}")
-            else:
-                if args.verbose:
-                    print(f"    ✓ [{reason:<30}] {sender[:40]:<40}  {subject[:45]}")
-
-        kept = len(emails) - len(marketing_ids)
-        print(f"         Marketing: {len(marketing_ids):<4}  Keeping: {kept}", flush=True)
-
-        if marketing_ids and not args.dry_run:
-            for i in range(0, len(marketing_ids), args.move_batch):
-                batch = marketing_ids[i : i + args.move_batch]
+            # Fetch with retry
+            emails: List[Dict] = []
+            total: int = 0
+            for attempt in range(3):
                 try:
-                    moved = move_emails(token, port, args.inbox, batch, args.archive_folder)
-                    print(f"         Archived {moved} (batch {i // args.move_batch + 1})", flush=True)
+                    emails, total = fetch_page(
+                        token, port, args.inbox, offset, args.page_size, args.days_back
+                    )
+                    break
                 except Exception as exc:
-                    print(f"         [ERROR] Move failed: {exc}", flush=True)
-                if i + args.move_batch < len(marketing_ids):
-                    time.sleep(args.move_delay)
+                    if attempt == 2:
+                        if not args.dry_run_summary:
+                            print(f"\n[ERROR] Failed after 3 attempts: {exc}\nStopping.")
+                        break
+                    wait = 10 * (attempt + 1)
+                    if not args.dry_run_summary:
+                        print(f"\n  Retry {attempt+1}/3 in {wait}s ...", end=" ", flush=True)
+                    time.sleep(wait)
 
-        total_archived += len(marketing_ids)
-        total_kept += kept
+            if not args.dry_run_summary:
+                print(f"fetched {len(emails):<4}  (inbox total: ~{total})", flush=True)
 
-        if len(emails) < args.page_size:
-            print("  Last page. Done!\n")
-            break
+            if not emails:
+                if not args.dry_run_summary:
+                    print("  No more emails. Done!\n")
+                break
 
-        offset += args.page_size
-        print(
-            f"         Total so far: {total_archived} archived / {total_kept} kept"
-            f"  — sleeping {args.fetch_delay}s...\n",
-            flush=True,
-        )
-        time.sleep(args.fetch_delay)
+            # Classify
+            marketing_ids: List[str] = []
+            ts = datetime.now().isoformat(timespec="seconds")
 
-    _print_summary(total_archived, total_kept, reason_counts, args.dry_run)
+            for email in emails:
+                sender  = email.get("author", "")
+                subject = email.get("subject", "")
+                mid     = email.get("id", "")
+
+                is_mkt, reason = classify(sender, subject, exclude_patterns)
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+                if csv_writer:
+                    csv_writer.writerow({
+                        "timestamp":    ts,
+                        "sender":       sender,
+                        "subject":      subject,
+                        "is_marketing": is_mkt,
+                        "reason":       reason,
+                    })
+
+                if is_mkt:
+                    marketing_ids.append(mid)
+                    if args.verbose and not args.dry_run_summary:
+                        print(f"    ✗ [{reason:<30}] {sender[:40]:<40}  {subject[:45]}")
+                else:
+                    if args.verbose and not args.dry_run_summary:
+                        print(f"    ✓ [{reason:<30}] {sender[:40]:<40}  {subject[:45]}")
+
+            kept = len(emails) - len(marketing_ids)
+            if not args.dry_run_summary:
+                print(f"         Marketing: {len(marketing_ids):<4}  Keeping: {kept}", flush=True)
+
+            # Archive
+            if marketing_ids and not args.dry_run:
+                for i in range(0, len(marketing_ids), args.move_batch):
+                    batch = marketing_ids[i : i + args.move_batch]
+                    try:
+                        moved = move_emails(token, port, args.inbox, batch, args.archive_folder)
+                        if not args.dry_run_summary:
+                            print(f"         Archived {moved} (batch {i // args.move_batch + 1})", flush=True)
+                    except Exception as exc:
+                        print(f"         [ERROR] Move failed: {exc}", flush=True)
+                    if i + args.move_batch < len(marketing_ids):
+                        time.sleep(args.move_delay)
+
+            total_archived += len(marketing_ids)
+            total_kept     += kept
+
+            if len(emails) < args.page_size:
+                if not args.dry_run_summary:
+                    print("  Last page. Done!\n")
+                break
+
+            offset += args.page_size
+            if not args.dry_run_summary:
+                print(
+                    f"         Running total: {total_archived} archived / {total_kept} kept"
+                    f"  — sleeping {args.fetch_delay}s...\n",
+                    flush=True,
+                )
+            time.sleep(args.fetch_delay)
+
+    finally:
+        if csv_fh:
+            csv_fh.close()
+
+    _print_summary(total_archived, total_kept, reason_counts, args.dry_run, args.export_csv)
 
 
-def _print_summary(archived, kept, reason_counts, dry_run):
+def _print_summary(
+    archived: int,
+    kept: int,
+    reason_counts: Dict[str, int],
+    dry_run: bool,
+    export_csv: Optional[str],
+) -> None:
     print(f"\n{'='*62}")
     if dry_run:
-        print(f"  DRY RUN — no emails moved.  Would have archived: {archived}")
+        print(f"  DRY RUN — no emails moved.")
+        print(f"  Would archive: {archived}")
     else:
         print(f"  COMPLETE")
         print(f"  Archived : {archived}")
     print(f"  Kept     : {kept}")
     if reason_counts:
-        print(f"\n  Breakdown by classification reason:")
+        print(f"\n  Classification breakdown:")
         for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
-            print(f"    {reason:<35} {count:>6}")
+            print(f"    {reason:<38} {count:>6}")
+    if export_csv:
+        print(f"\n  Exported : {export_csv}")
     print(f"{'='*62}\n")
 
 
@@ -613,30 +901,50 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--inbox",            default=DEFAULT_INBOX,
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+
+    p.add_argument("--config",          metavar="PATH",
+                   help="Path to JSON config file (default: ~/.config/archive_marketing/config.json).")
+    p.add_argument("--inbox",           default=DEFAULTS["inbox"],
                    help="IMAP folder URI of your inbox.")
-    p.add_argument("--archive-folder",   default=DEFAULT_ARCHIVE_FOLDER,
-                   help="IMAP folder URI to move marketing emails into.")
-    p.add_argument("--connection-file",  default=DEFAULT_CONNECTION_FILE,
+    p.add_argument("--archive-folder",  default=DEFAULTS["archive_folder"],
+                   help="IMAP folder URI for archived marketing emails.")
+    p.add_argument("--connection-file", default=DEFAULTS["connection_file"],
                    help="Path to thunderbird-mcp connection.json.")
-    p.add_argument("--page-size",        type=int,   default=DEFAULT_PAGE_SIZE)
-    p.add_argument("--fetch-delay",      type=float, default=DEFAULT_FETCH_DELAY,
+    p.add_argument("--page-size",       type=int,   default=DEFAULTS["page_size"],
+                   help="Emails fetched per API call.")
+    p.add_argument("--fetch-delay",     type=float, default=DEFAULTS["fetch_delay"],
                    help="Seconds between page fetches (IMAP rate limit).")
-    p.add_argument("--move-delay",       type=float, default=DEFAULT_MOVE_DELAY,
+    p.add_argument("--move-delay",      type=float, default=DEFAULTS["move_delay"],
                    help="Seconds between bulk-move calls.")
-    p.add_argument("--move-batch",       type=int,   default=DEFAULT_MOVE_BATCH,
+    p.add_argument("--move-batch",      type=int,   default=DEFAULTS["move_batch"],
                    help="Max message IDs per move request.")
-    p.add_argument("--start-offset",     type=int,   default=DEFAULT_START_OFFSET,
+    p.add_argument("--start-offset",    type=int,   default=DEFAULTS["start_offset"],
                    help="Skip first N emails (resume support).")
-    p.add_argument("--days-back",        type=int,   default=DEFAULT_DAYS_BACK,
+    p.add_argument("--days-back",       type=int,   default=DEFAULTS["days_back"],
                    help="How many days back to scan.")
-    p.add_argument("--dry-run",          action="store_true",
+    p.add_argument("--exclude",         metavar="REGEX", action="append", default=[],
+                   help="Regex pattern: matching sender/subject always kept. Repeatable.")
+    p.add_argument("--export-csv",      metavar="PATH",
+                   help="Write every classification decision to a CSV file.")
+    p.add_argument("--dry-run",         action="store_true",
                    help="Classify only — do not move any email.")
-    p.add_argument("--verbose", "-v",    action="store_true",
+    p.add_argument("--dry-run-summary", action="store_true",
+                   help="Dry run with only the final summary printed (quiet mode).")
+    p.add_argument("--verbose", "-v",   action="store_true",
                    help="Print every classification decision.")
     return p
 
 
 if __name__ == "__main__":
-    args = build_parser().parse_args()
+    parser = build_parser()
+    cli    = parser.parse_args()
+
+    # --dry-run-summary implies --dry-run
+    if cli.dry_run_summary:
+        cli.dry_run = True
+
+    file_cfg = load_config(cli.config)
+    args     = merge_config(cli, file_cfg)
+
     run(args)

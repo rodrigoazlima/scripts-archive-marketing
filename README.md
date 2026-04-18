@@ -4,6 +4,7 @@
 [![License: GNU](https://img.shields.io/badge/License-GNUv3-blue.svg)](LICENSE)
 [![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](archive_marketing.py)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](archive_marketing.py)
+[![CI](https://github.com/rodrigoazlima/scripts-archive-marketing/actions/workflows/ci.yml/badge.svg)](https://github.com/rodrigoazlima/scripts-archive-marketing/actions)
 
 > **Automatically classify and archive marketing emails from your Thunderbird inbox — without opening a single email.**
 
@@ -20,7 +21,11 @@ Uses the [thunderbird-mcp](https://github.com/joelpurra/thunderbird-mcp) bridge 
 - 📄 **Dry-run mode** — preview what would be archived without touching anything
 - 🔁 **Resume support** — `--start-offset` to continue interrupted runs
 - 🌍 **Multilingual patterns** — English + Portuguese marketing keywords built-in
-- 🛠️ **Fully configurable** — all settings via CLI flags
+- 🛠️ **Config file** — persist settings in `~/.config/archive_marketing/config.json`
+- 🌿 **Env var support** — override any setting via environment variables
+- 🚫 **Exclude list** — `--exclude` flag to always keep specific senders/patterns
+- 📊 **CSV export** — log every classification decision to a file
+- 🧪 **Tested** — 40 unit tests covering all classification rules
 
 ---
 
@@ -28,7 +33,7 @@ Uses the [thunderbird-mcp](https://github.com/joelpurra/thunderbird-mcp) bridge 
 
 ### 1. Mozilla Thunderbird
 
-Download from [thunderbird.net](https://www.thunderbird.net). Must be running when the script executes.
+Download from [thunderbird.net](https://www.thunderbird.net). **Must be running** when the script executes.
 
 ### 2. thunderbird-mcp Extension
 
@@ -38,8 +43,10 @@ This script communicates with Thunderbird via the **thunderbird-mcp** MCP bridge
 
 Follow the installation instructions in that repo. Once installed:
 - The extension exposes a local HTTP server on `localhost:8765`
-- A connection file is written to `%TEMP%\thunderbird-mcp\connection.json` (Windows) or `/tmp/thunderbird-mcp/connection.json` (macOS/Linux)
-- The connection file contains the auth token and port — **never share this file**
+- A connection file is written to:
+  - **Windows:** `%TEMP%\thunderbird-mcp\connection.json`
+  - **macOS/Linux:** `/tmp/thunderbird-mcp/connection.json`
+- The connection file contains the auth token and port — **never share or commit this file**
 
 ### 3. Python 3.8+
 
@@ -60,107 +67,149 @@ git clone https://github.com/rodrigoazlima/scripts-archive-marketing.git
 cd scripts-archive-marketing
 ```
 
-### Step 2 — Find your inbox IMAP URI
+### Step 2 — Find your IMAP folder URIs
 
-Open Thunderbird → right-click your Inbox → **Properties** → copy the folder path.
-It looks like:
+Open Thunderbird → right-click a folder → **Properties** → copy the path.
 
+Inbox example:
 ```
 imap://you%40gmail.com@imap.gmail.com/INBOX
 ```
 
-### Step 3 — Find your archive folder URI
+Archive folder example (create it in Thunderbird first):
+```
+imap://you%40gmail.com@imap.gmail.com/Marketing
+```
 
-Same process for the destination folder (e.g. a "Marketing" or "🏬 Commerce" folder).
-Create the folder in Thunderbird first if it doesn't exist.
+### Step 3 — Create a config file (recommended)
+
+```bash
+cp config.example.json ~/.config/archive_marketing/config.json
+# then edit with your actual IMAP URIs
+```
 
 ### Step 4 — Dry run first
 
 ```bash
-python archive_marketing.py \
-  --inbox "imap://you%40gmail.com@imap.gmail.com/INBOX" \
-  --archive-folder "imap://you%40gmail.com@imap.gmail.com/Marketing" \
-  --dry-run \
-  --verbose
+python archive_marketing.py --dry-run --verbose
 ```
-
-This prints every classification decision without moving anything.
 
 ### Step 5 — Run for real
 
 ```bash
-python archive_marketing.py \
-  --inbox "imap://you%40gmail.com@imap.gmail.com/INBOX" \
-  --archive-folder "imap://you%40gmail.com@imap.gmail.com/Marketing"
+python archive_marketing.py
 ```
 
 ---
 
-## ⚙️ All Options
+## ⚙️ Configuration
+
+Settings are resolved in this priority order: **CLI flags > env vars > config file > defaults**
+
+### Config file
+
+Copy `config.example.json` to `~/.config/archive_marketing/config.json`:
+
+```json
+{
+  "inbox":          "imap://you%40gmail.com@imap.gmail.com/INBOX",
+  "archive_folder": "imap://you%40gmail.com@imap.gmail.com/Marketing",
+  "page_size":      100,
+  "fetch_delay":    2.0,
+  "exclude": [
+    "payroll@mycompany.com",
+    "boss@mycompany.com"
+  ]
+}
+```
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `ARCHIVE_INBOX` | IMAP URI of inbox |
+| `ARCHIVE_FOLDER` | IMAP URI of archive destination |
+| `ARCHIVE_CONNECTION_FILE` | Path to thunderbird-mcp connection.json |
+| `ARCHIVE_PAGE_SIZE` | Emails per API call |
+| `ARCHIVE_FETCH_DELAY` | Seconds between page fetches |
+| `ARCHIVE_MOVE_DELAY` | Seconds between move calls |
+| `ARCHIVE_START_OFFSET` | Resume from offset |
+| `ARCHIVE_DAYS_BACK` | How many days back to scan |
+
+### All CLI flags
 
 ```
-usage: archive_marketing.py [options]
-
 options:
+  --version              Show version and exit
+  --config PATH          Path to JSON config file
   --inbox URI            IMAP folder URI of your inbox
-  --archive-folder URI   IMAP folder URI to move marketing emails into
+  --archive-folder URI   IMAP folder URI for archived emails
   --connection-file PATH Path to thunderbird-mcp connection.json
-                         (default: auto-detected from %TEMP% / /tmp)
-  --page-size N          Emails fetched per API call (default: 100)
-  --fetch-delay SECS     Seconds between page fetches (default: 2.0)
-  --move-delay SECS      Seconds between bulk-move calls (default: 1.5)
-  --move-batch N         Max IDs per single move request (default: 50)
-  --start-offset N       Skip first N emails — resume support (default: 0)
-  --days-back N          How far back to scan in days (default: 3650)
-  --dry-run              Classify only, do not move anything
+  --page-size N          Emails per API call (default: 100)
+  --fetch-delay SECS     Delay between page fetches (default: 2.0)
+  --move-delay SECS      Delay between move calls (default: 1.5)
+  --move-batch N         Max IDs per move request (default: 50)
+  --start-offset N       Skip first N emails — resume (default: 0)
+  --days-back N          Days back to scan (default: 3650)
+  --exclude REGEX        Keep emails matching this pattern (repeatable)
+  --export-csv PATH      Write all decisions to a CSV file
+  --dry-run              Classify only — do not move emails
+  --dry-run-summary      Dry run, print only final summary
   --verbose, -v          Print every classification decision
-  -h, --help             Show this help message
+  -h, --help             Show help
 ```
 
 ---
 
 ## 🔍 How Classification Works
 
-The script classifies each email using **two regex patterns** applied to the sender address and subject line. **The email body is never fetched or read.**
-
-### Marketing sender pattern
-
-Matches addresses from known marketing domains:
+The script classifies each email using a **weighted scoring system** applied only to the sender address and subject line. **The email body is never fetched or read.**
 
 ```
-aliexpress, shopee, ebay, shein, indeed.com, glassdoor,
-levels.fyi, medium.com, substack, mailchimp, sendgrid,
-binance, coinbase, spotify, netflix, steam, epicgames ...
+┌─────────────────────────────────────────────────┐
+│  For each email (sender + subject)              │
+│                                                 │
+│  1. User --exclude list?  → KEEP               │
+│  2. Safe allowlist?       → KEEP               │
+│  3. Strong sender match?  → ARCHIVE            │
+│  4. Marketing subject?    → ARCHIVE            │
+│  5. noreply + weak word?  → ARCHIVE            │
+│  6. Default               → KEEP               │
+└─────────────────────────────────────────────────┘
 ```
 
-### Marketing subject pattern
-
-Matches promotional keywords (English + Portuguese built-in):
-
+### Tier 1 — Safe allowlist (always kept)
 ```
-desconto, oferta, promoção, liquidação, sale, deal,
-X% off, free trial, newsletter, giveaway, cupom, coupon,
-talent pool, frete grátis ...
+no-reply@accounts.google.com   Google security alerts
+noreply@google.com             Google notifications
+noreply@github.com             GitHub security alerts
+no-reply@*.apple.com           Apple account alerts
 ```
 
-### Safe-sender allowlist
+### Tier 2 — Strong sender (always archived)
+100+ known marketing platforms and domains including:
+- Email platforms: Mailchimp, SendGrid, Klaviyo, ActiveCampaign, Brevo, Iterable…
+- E-commerce: AliExpress, Shopee, Mercado Livre, Shein, Kabum…
+- Job boards: Indeed, Glassdoor, Catho, Vagas.com…
+- Travel: Decolar, Booking.com, Airbnb, LATAM…
+- Gaming: Epic Games, Steam, PlayStation…
+- Streaming: Netflix, Spotify, Disney+…
+- Crypto: Binance, Coinbase, Bybit…
 
-Some senders are **always kept** regardless of subject:
+### Tier 3 — Marketing subject (always archived)
+Promotional keywords in English + Portuguese:
+```
+desconto, oferta, sale, deal, % off, giveaway, newsletter, digest,
+announcing, introducing, unsubscribe, talent pool, frete grátis,
+imperdível, aproveite, black friday, free trial, job alert…
+```
 
-```
-no-reply@accounts.google.com  →  Google security alerts
-noreply@google.com            →  Google notifications
-```
+### Tier 4 — Weak combo (archived when combined)
+`noreply` sender + weak engagement word (tips, reminder, trending, featured…) → archived
 
 ### Extending the patterns
 
-Edit the three pattern constants at the top of `archive_marketing.py`:
-
-```python
-MARKETING_SENDER_PATTERN = re.compile(r"...|your-domain\.com", re.IGNORECASE | re.VERBOSE)
-MARKETING_SUBJECT_PATTERN = re.compile(r"...|your keyword", re.IGNORECASE | re.VERBOSE)
-SAFE_SENDER_PATTERN = re.compile(r"...|trusted@domain\.com", re.IGNORECASE)
-```
+Edit the pattern constants at the top of `archive_marketing.py`. They are standard Python regex with `re.VERBOSE` for readability — add your domains and keywords freely.
 
 ---
 
@@ -168,12 +217,13 @@ SAFE_SENDER_PATTERN = re.compile(r"...|trusted@domain\.com", re.IGNORECASE)
 
 | Concern | How it's handled |
 |---------|-----------------|
-| Email credentials | **Never used.** The script talks to Thunderbird locally — Thunderbird manages your IMAP credentials. |
-| Auth token | Read at runtime from the thunderbird-mcp connection file. Never stored, never logged, never committed. |
-| Email content | **Never fetched.** Classification uses only the `sender` and `subject` fields. |
-| Network access | All communication is `localhost` only (`127.0.0.1:8765`). Nothing leaves your machine. |
+| Email credentials | **Never used.** Thunderbird manages your IMAP credentials. |
+| Auth token | Read at runtime from the thunderbird-mcp connection file. Never stored, logged, or committed. |
+| Email content | **Never fetched.** Only `sender` and `subject` fields are used. |
+| Network access | All communication is `localhost` only. Nothing leaves your machine. |
+| Connection file perms | Script warns if the file has world-readable permissions (POSIX). |
 
-> ⚠️ **Never commit `connection.json`** — it contains a live session token. It is excluded by `.gitignore`.
+> ⚠️ **Never commit `connection.json`** — it contains a live session token. Excluded by `.gitignore`.
 
 ---
 
@@ -181,24 +231,44 @@ SAFE_SENDER_PATTERN = re.compile(r"...|trusted@domain\.com", re.IGNORECASE)
 
 ```
 scripts-archive-marketing/
-├── archive_marketing.py   # Main script — all logic in one file
-├── README.md              # This file
-├── LICENSE                # GPL v3
+├── archive_marketing.py       # Main script
+├── config.example.json        # Example config file
+├── tests/
+│   └── test_classification.py # 40 unit tests
+├── .github/
+│   ├── workflows/ci.yml       # GitHub Actions CI
+│   └── ISSUE_TEMPLATE/        # Bug report & feature request templates
+├── README.md
+├── LICENSE                    # GPL v3
 └── .gitignore
+```
+
+---
+
+## 🧪 Running Tests
+
+```bash
+# Standard unittest (no dependencies)
+python -m unittest tests.test_classification -v
+
+# With pytest (optional)
+pip install pytest
+pytest tests/ -v
 ```
 
 ---
 
 ## 💡 Scheduling (run daily automatically)
 
-> **Important:** Thunderbird must be open and running when the script executes. The thunderbird-mcp bridge only works while Thunderbird is active.
+> **Important:** Thunderbird must be open and running when the script executes.
 
 ### Windows — Task Scheduler
 
 ```powershell
 $action = New-ScheduledTaskAction `
   -Execute "python.exe" `
-  -Argument '"C:\path\to\archive_marketing.py" --inbox "imap://you%40gmail.com@imap.gmail.com/INBOX" --archive-folder "imap://you%40gmail.com@imap.gmail.com/Marketing"'
+  -Argument '"C:\path\to\archive_marketing.py"' `
+  -WorkingDirectory "C:\path\to\scripts-archive-marketing"
 
 $trigger = New-ScheduledTaskTrigger -Daily -At "05:00AM"
 
@@ -212,16 +282,8 @@ Register-ScheduledTask `
 
 ### macOS / Linux — cron
 
-```bash
-crontab -e
-```
-
-Add:
-
 ```cron
-0 5 * * * /usr/bin/python3 /path/to/archive_marketing.py \
-  --inbox "imap://you%40gmail.com@imap.gmail.com/INBOX" \
-  --archive-folder "imap://you%40gmail.com@imap.gmail.com/Marketing"
+0 5 * * * cd /path/to/scripts-archive-marketing && python3 archive_marketing.py
 ```
 
 ---
@@ -233,36 +295,80 @@ Your inbox
     │
     ▼
 thunderbird-mcp (Thunderbird extension)
-    │  exposes HTTP on localhost:8765
-    │  auth token in %TEMP%/thunderbird-mcp/connection.json
+    │  HTTP server on localhost:8765
+    │  auth token in connection.json
     │
     ▼
 archive_marketing.py
-    │  reads connection.json at startup
-    │  calls getRecentMessages (paginated, with offset)
-    │  classifies sender + subject via regex
-    │  calls updateMessage to bulk-move marketing emails
+    │  1. load_connection()  — read token + port
+    │  2. fetch_page()       — getRecentMessages (paginated)
+    │  3. classify()         — 4-tier regex scoring
+    │  4. move_emails()      — updateMessage (bulk move)
     │
     ▼
-Archive folder (stays in Thunderbird / IMAP server)
+Archive folder (IMAP server, stays private)
 ```
 
-The script speaks the **MCP JSON-RPC protocol** directly over HTTP — the same protocol used by Claude Code's MCP integration. No special library is needed.
+The script speaks **MCP JSON-RPC over HTTP** — no special libraries needed.
+
+---
+
+## 🐛 Troubleshooting
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| `Connection file not found` | Thunderbird not running | Start Thunderbird, wait 5s, retry |
+| `Connection file not found` | Extension not installed | Install thunderbird-mcp, restart Thunderbird |
+| `Authentication failed (403)` | Token expired | Restart Thunderbird to refresh the token |
+| `MCP error: Invalid parameters` | Wrong folder URI | Right-click folder → Properties → copy the exact URI |
+| Emoji in folder path crashes | Windows cp1252 terminal | Use `python -X utf8 archive_marketing.py` |
+| Script runs but archives nothing | Folder URI wrong | Run with `--dry-run --verbose` to inspect |
+| Too many emails per run | Gmail rate limit | Increase `--fetch-delay` to 3.0 or more |
+| False positives (legit email archived) | Pattern too broad | Add sender to `--exclude` or config `exclude` list |
+
+### Enable debug output
+
+```bash
+python archive_marketing.py --dry-run --verbose
+```
+
+### Check Thunderbird MCP status
+
+Open Thunderbird → Add-ons → find thunderbird-mcp → status should show "Enabled" and a port number.
+
+---
+
+## ❓ FAQ
+
+**Q: Does this work with non-Gmail IMAP accounts?**  
+A: Yes. Any IMAP account configured in Thunderbird works — just use the correct folder URI from Thunderbird's folder properties.
+
+**Q: How do I find my folder URI?**  
+A: Right-click any folder in Thunderbird → **Properties** → the path shown is the URI. URL-encode the `@` as `%40`.
+
+**Q: Can I run multiple inboxes?**  
+A: Run the script once per inbox with different `--inbox` and `--archive-folder` arguments.
+
+**Q: Will it re-archive already-archived emails?**  
+A: No. It only reads from `--inbox`. Emails already moved are not re-processed.
+
+**Q: Is the connection token safe?**  
+A: The token is a local session secret generated by Thunderbird. It never leaves your machine. The script reads it at runtime and never logs it.
+
+**Q: What if Thunderbird is closed when the scheduled task runs?**  
+A: The script exits immediately with a clear error message. Set `StartWhenAvailable` in Task Scheduler so it retries when Thunderbird is next open.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions welcome! Ideas:
+Contributions welcome! See [ISSUE_TEMPLATE](.github/ISSUE_TEMPLATE/) for how to report bugs or suggest new marketing patterns.
 
-- 🌐 Add marketing patterns for more languages/regions
-- 📊 Output a summary report (JSON / HTML)
+Ideas:
+- 🌐 Marketing patterns for more languages/regions (Spanish, French, German…)
 - 📧 Support multiple inboxes in one run
-- 🔧 Config file support (TOML / YAML) instead of CLI flags
-- 🧪 Unit tests for classification patterns
-- 🐧 Test on macOS / Linux and document connection file path differences
-
-Please open an issue or pull request!
+- 🔄 Rollback support (move back from archive to inbox)
+- 📈 HTML/JSON summary reports
 
 ---
 
