@@ -35,6 +35,12 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+# Force UTF-8 stdout/stderr on Windows (handles emoji in folder paths/subjects)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 # ---------------------------------------------------------------------------
 # Default configuration — override via CLI flags
