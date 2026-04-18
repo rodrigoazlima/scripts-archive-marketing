@@ -1,3 +1,8 @@
+# thunderbird-mcp auth token — NEVER commit this
+connection.json
+thunderbird-mcp/
+logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
