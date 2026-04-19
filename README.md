@@ -1,6 +1,6 @@
 # 📬 Thunderbird Inbox Marketing Archiver
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue)](archive_marketing.py)
+[![Version](https://img.shields.io/badge/version-1.2.1-blue)](archive_marketing.py)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License: GNU](https://img.shields.io/badge/License-GNUv3-blue.svg)](LICENSE)
 [![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](archive_marketing.py)
