@@ -1144,20 +1144,23 @@ def run(args: argparse.Namespace) -> None:
     run_duration = time.time() - run_start
     _print_summary(total_archived, total_kept, reason_counts, args.dry_run, args.export_csv)
 
+    # Always clean up previous reports regardless of whether a new one will be sent.
+    # A leftover report in the inbox must be moved even on runs with nothing archived.
+    if getattr(args, "cleanup_prev_reports", True):
+        rf = getattr(args, "reports_folder", None)
+        if rf:
+            if ensure_reports_folder(token, port, rf):
+                cleanup_prev_reports(token, port, args.inbox, rf, args.move_batch)
+        else:
+            print(
+                "[cleanup] cleanup_prev_reports enabled but reports_folder not set — skipping.",
+                flush=True,
+            )
+
     if getattr(args, "send_report", False):
         if total_archived == 0 and getattr(args, "skip_report_if_empty", True):
             print("[report] No emails archived — skipping report.", flush=True)
         else:
-            if getattr(args, "cleanup_prev_reports", True):
-                rf = getattr(args, "reports_folder", None)
-                if rf:
-                    if ensure_reports_folder(token, port, rf):
-                        cleanup_prev_reports(token, port, args.inbox, rf, args.move_batch)
-                else:
-                    print(
-                        "[cleanup] cleanup_prev_reports enabled but reports_folder not set — skipping.",
-                        flush=True,
-                    )
             send_report_email(token, port, args, total_archived, total_kept, reason_counts, run_duration)
 
 
