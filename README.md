@@ -142,6 +142,8 @@ Copy `config.example.json` to `~/.config/archive_marketing/config.json`:
 | `ARCHIVE_SEND_REPORT` | `true`/`false` — send email report after run |
 | `ARCHIVE_REPORT_TO` | Recipient email for the report (default: auto from Thunderbird) |
 | `ARCHIVE_SKIP_REPORT_IF_EMPTY` | `true`/`false` — skip report when nothing archived (default: `true`) |
+| `ARCHIVE_CLEANUP_PREV_REPORTS` | `true`/`false` — move previous open reports before sending new one (default: `true`) |
+| `ARCHIVE_REPORTS_FOLDER` | IMAP folder URI where previous open reports are moved |
 
 ### All CLI flags
 
@@ -165,6 +167,8 @@ options:
   --send-report          Send HTML email report after each run
   --report-to EMAIL      Report recipient (default: auto-detect from Thunderbird)
   --no-skip-report-if-empty  Send report even when no emails archived (default: skip)
+  --reports-folder URI       IMAP folder URI for previous open reports (cleanup destination)
+  --no-cleanup-prev-reports  Skip moving previous open reports before sending new one
   --verbose, -v          Print every classification decision
   -h, --help             Show help
 ```

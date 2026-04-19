@@ -19,5 +19,7 @@
 
   "send_report": false,
   "report_to":   "",
-  "skip_report_if_empty": true
+  "skip_report_if_empty": true,
+  "cleanup_prev_reports": true,
+  "reports_folder": ""
 }

@@ -77,7 +77,9 @@ DEFAULTS: Dict = {
     "exclude":         [],
     "send_report":          False,
     "report_to":            None,
-    "skip_report_if_empty": True,
+    "skip_report_if_empty":    True,
+    "cleanup_prev_reports":    True,
+    "reports_folder":          None,
 }
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "archive_marketing" / "config.json"
@@ -492,7 +494,9 @@ def merge_config(cli_args: argparse.Namespace, file_cfg: Dict) -> argparse.Names
         "days_back":       "ARCHIVE_DAYS_BACK",
         "send_report":          "ARCHIVE_SEND_REPORT",
         "report_to":            "ARCHIVE_REPORT_TO",
-        "skip_report_if_empty": "ARCHIVE_SKIP_REPORT_IF_EMPTY",
+        "skip_report_if_empty":    "ARCHIVE_SKIP_REPORT_IF_EMPTY",
+        "cleanup_prev_reports":    "ARCHIVE_CLEANUP_PREV_REPORTS",
+        "reports_folder":          "ARCHIVE_REPORTS_FOLDER",
     }
 
     for attr, env_key in ENV_MAP.items():
@@ -718,6 +722,73 @@ def open_csv_writer(path: str):
     writer = csv.DictWriter(fh, fieldnames=["timestamp", "sender", "subject", "is_marketing", "reason"])
     writer.writeheader()
     return fh, writer
+
+
+# ---------------------------------------------------------------------------
+# Previous report cleanup
+# ---------------------------------------------------------------------------
+
+_REPORT_SUBJECT_PREFIX = "[Archive Report]"
+
+
+def cleanup_prev_reports(
+    token: str,
+    port: int,
+    inbox: str,
+    reports_folder: str,
+    move_batch: int = 50,
+) -> int:
+    """
+    Move any previous archive-run report emails (unread, still in inbox) to
+    reports_folder.  Matches only on subject prefix — email bodies are never
+    fetched or read.
+
+    Args:
+        token:          MCP auth token.
+        port:           MCP bridge port.
+        inbox:          Source IMAP folder URI.
+        reports_folder: Destination IMAP folder URI for old reports.
+        move_batch:     Max IDs per move request.
+
+    Returns:
+        Number of report emails moved.
+    """
+    offset = 0
+    page_size = 100
+    matched_ids: List[str] = []
+
+    while True:
+        try:
+            emails, _ = fetch_page(token, port, inbox, offset, page_size, days_back=3650)
+        except Exception as exc:
+            print(f"[cleanup] Failed to fetch inbox page: {exc}", flush=True)
+            break
+
+        if not emails:
+            break
+
+        for msg in emails:
+            subject = msg.get("subject", "")
+            if subject.startswith(_REPORT_SUBJECT_PREFIX):
+                matched_ids.append(msg.get("id", ""))
+
+        if len(emails) < page_size:
+            break
+        offset += page_size
+
+    if not matched_ids:
+        return 0
+
+    moved = 0
+    for i in range(0, len(matched_ids), move_batch):
+        batch = matched_ids[i: i + move_batch]
+        try:
+            moved += move_emails(token, port, inbox, batch, reports_folder)
+        except Exception as exc:
+            print(f"[cleanup] Move failed: {exc}", flush=True)
+
+    print(f"[cleanup] Moved {moved} previous report(s) to reports folder.", flush=True)
+    return moved
 
 
 # ---------------------------------------------------------------------------
@@ -1036,6 +1107,15 @@ def run(args: argparse.Namespace) -> None:
         if total_archived == 0 and getattr(args, "skip_report_if_empty", True):
             print("[report] No emails archived — skipping report.", flush=True)
         else:
+            if getattr(args, "cleanup_prev_reports", True):
+                rf = getattr(args, "reports_folder", None)
+                if rf:
+                    cleanup_prev_reports(token, port, args.inbox, rf, args.move_batch)
+                else:
+                    print(
+                        "[cleanup] cleanup_prev_reports enabled but reports_folder not set — skipping.",
+                        flush=True,
+                    )
             send_report_email(token, port, args, total_archived, total_kept, reason_counts, run_duration)
 
 
@@ -1115,6 +1195,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-skip-report-if-empty", dest="skip_report_if_empty",
                    action="store_false", default=DEFAULTS["skip_report_if_empty"],
                    help="Send report even when no emails were archived (default: skip if empty).")
+    p.add_argument("--reports-folder",       metavar="URI", default=DEFAULTS["reports_folder"],
+                   help="IMAP folder URI where previous open reports are moved before sending a new one.")
+    p.add_argument("--no-cleanup-prev-reports", dest="cleanup_prev_reports",
+                   action="store_false", default=DEFAULTS["cleanup_prev_reports"],
+                   help="Skip moving previous open reports before sending new report (default: move them).")
     return p
 
 
