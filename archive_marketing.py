@@ -75,8 +75,9 @@ DEFAULTS: Dict = {
     "dry_run_summary": False,
     "export_csv":      None,
     "exclude":         [],
-    "send_report":     False,
-    "report_to":       None,
+    "send_report":          False,
+    "report_to":            None,
+    "skip_report_if_empty": True,
 }
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "archive_marketing" / "config.json"
@@ -489,8 +490,9 @@ def merge_config(cli_args: argparse.Namespace, file_cfg: Dict) -> argparse.Names
         "move_delay":      "ARCHIVE_MOVE_DELAY",
         "start_offset":    "ARCHIVE_START_OFFSET",
         "days_back":       "ARCHIVE_DAYS_BACK",
-        "send_report":     "ARCHIVE_SEND_REPORT",
-        "report_to":       "ARCHIVE_REPORT_TO",
+        "send_report":          "ARCHIVE_SEND_REPORT",
+        "report_to":            "ARCHIVE_REPORT_TO",
+        "skip_report_if_empty": "ARCHIVE_SKIP_REPORT_IF_EMPTY",
     }
 
     for attr, env_key in ENV_MAP.items():
@@ -1031,7 +1033,10 @@ def run(args: argparse.Namespace) -> None:
     _print_summary(total_archived, total_kept, reason_counts, args.dry_run, args.export_csv)
 
     if getattr(args, "send_report", False):
-        send_report_email(token, port, args, total_archived, total_kept, reason_counts, run_duration)
+        if total_archived == 0 and getattr(args, "skip_report_if_empty", True):
+            print("[report] No emails archived — skipping report.", flush=True)
+        else:
+            send_report_email(token, port, args, total_archived, total_kept, reason_counts, run_duration)
 
 
 def _print_summary(
@@ -1103,10 +1108,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Dry run with only the final summary printed (quiet mode).")
     p.add_argument("--verbose", "-v",   action="store_true",
                    help="Print every classification decision.")
-    p.add_argument("--send-report",     action="store_true", default=DEFAULTS["send_report"],
+    p.add_argument("--send-report",          action="store_true", default=DEFAULTS["send_report"],
                    help="Send an HTML email summary report after each run.")
-    p.add_argument("--report-to",       metavar="EMAIL", default=DEFAULTS["report_to"],
+    p.add_argument("--report-to",            metavar="EMAIL", default=DEFAULTS["report_to"],
                    help="Recipient for the report email (default: auto-detect from Thunderbird).")
+    p.add_argument("--no-skip-report-if-empty", dest="skip_report_if_empty",
+                   action="store_false", default=DEFAULTS["skip_report_if_empty"],
+                   help="Send report even when no emails were archived (default: skip if empty).")
     return p
 
 

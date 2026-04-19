@@ -141,6 +141,7 @@ Copy `config.example.json` to `~/.config/archive_marketing/config.json`:
 | `ARCHIVE_DAYS_BACK` | How many days back to scan |
 | `ARCHIVE_SEND_REPORT` | `true`/`false` — send email report after run |
 | `ARCHIVE_REPORT_TO` | Recipient email for the report (default: auto from Thunderbird) |
+| `ARCHIVE_SKIP_REPORT_IF_EMPTY` | `true`/`false` — skip report when nothing archived (default: `true`) |
 
 ### All CLI flags
 
@@ -163,6 +164,7 @@ options:
   --dry-run-summary      Dry run, print only final summary
   --send-report          Send HTML email report after each run
   --report-to EMAIL      Report recipient (default: auto-detect from Thunderbird)
+  --no-skip-report-if-empty  Send report even when no emails archived (default: skip)
   --verbose, -v          Print every classification decision
   -h, --help             Show help
 ```
