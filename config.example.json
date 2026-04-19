@@ -15,5 +15,8 @@
   "exclude": [
     "boss@mycompany.com",
     "payroll@mycompany.com"
-  ]
+  ],
+
+  "send_report": false,
+  "report_to":   ""
 }

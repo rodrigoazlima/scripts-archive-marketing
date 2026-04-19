@@ -52,7 +52,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # ---------------------------------------------------------------------------
 # Default configuration
@@ -75,6 +75,8 @@ DEFAULTS: Dict = {
     "dry_run_summary": False,
     "export_csv":      None,
     "exclude":         [],
+    "send_report":     False,
+    "report_to":       None,
 }
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "archive_marketing" / "config.json"
@@ -487,6 +489,8 @@ def merge_config(cli_args: argparse.Namespace, file_cfg: Dict) -> argparse.Names
         "move_delay":      "ARCHIVE_MOVE_DELAY",
         "start_offset":    "ARCHIVE_START_OFFSET",
         "days_back":       "ARCHIVE_DAYS_BACK",
+        "send_report":     "ARCHIVE_SEND_REPORT",
+        "report_to":       "ARCHIVE_REPORT_TO",
     }
 
     for attr, env_key in ENV_MAP.items():
@@ -494,8 +498,10 @@ def merge_config(cli_args: argparse.Namespace, file_cfg: Dict) -> argparse.Names
         if getattr(cli_args, attr, None) == default_val:
             if env_key in os.environ:
                 raw = os.environ[env_key]
-                # Cast to correct type
-                if isinstance(default_val, int):
+                # Cast to correct type (bool must come before int — bool is subclass of int)
+                if isinstance(default_val, bool):
+                    raw = raw.lower() in ("1", "true", "yes")
+                elif isinstance(default_val, int):
                     raw = int(raw)
                 elif isinstance(default_val, float):
                     raw = float(raw)
@@ -713,6 +719,165 @@ def open_csv_writer(path: str):
 
 
 # ---------------------------------------------------------------------------
+# Email report
+# ---------------------------------------------------------------------------
+
+def _tb_identity(token: str, port: int) -> Tuple[str, str]:
+    """
+    Return (email, display_name) of the first Thunderbird IMAP identity.
+
+    Falls back to ("", "") if listAccounts fails or returns no identities.
+    """
+    try:
+        accounts = _mcp_call(token, port, "listAccounts", {})
+        for acct in accounts:
+            ids = acct.get("identities", [])
+            if ids:
+                return ids[0].get("email", ""), ids[0].get("name", "")
+    except Exception:
+        pass
+    return "", ""
+
+
+def send_report_email(
+    token: str,
+    port: int,
+    args: argparse.Namespace,
+    archived: int,
+    kept: int,
+    reason_counts: Dict[str, int],
+    run_duration: float,
+) -> None:
+    """
+    Send an HTML email summary report via Thunderbird after an archiving run.
+
+    Sender and recipient identity are resolved from Thunderbird's account list
+    unless ``args.report_to`` is set explicitly in config/CLI.
+
+    Args:
+        token:         MCP auth token.
+        port:          MCP bridge port.
+        args:          Merged config namespace (inbox, archive_folder, dry_run…).
+        archived:      Number of emails archived in this run.
+        kept:          Number of emails kept in this run.
+        reason_counts: Classification reason breakdown dict.
+        run_duration:  Wall-clock seconds the run took.
+    """
+    sender_email, sender_name = _tb_identity(token, port)
+    report_to = getattr(args, "report_to", None) or sender_email
+
+    if not report_to:
+        print(
+            "[report] Cannot determine report recipient. "
+            "Set 'report_to' in config.json or use --report-to.",
+            flush=True,
+        )
+        return
+
+    now       = datetime.now()
+    date_str  = now.strftime("%A, %B %d, %Y")
+    time_str  = now.strftime("%H:%M")
+    dry_label = " (DRY RUN)" if args.dry_run else ""
+
+    if run_duration < 60:
+        dur_str = f"{run_duration:.0f}s"
+    else:
+        dur_str = f"{run_duration / 60:.1f}m"
+
+    # Classification breakdown table rows
+    breakdown_rows = "\n".join(
+        f"<tr><td>{r}</td><td style='text-align:right'><strong>{c}</strong></td></tr>"
+        for r, c in sorted(reason_counts.items(), key=lambda x: -x[1])
+    )
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;
+        color:#1a1a1a;margin:0;padding:20px;background:#f5f5f5}}
+  .card{{background:#fff;border-radius:8px;padding:24px;max-width:620px;margin:0 auto;
+         box-shadow:0 1px 4px rgba(0,0,0,.08)}}
+  h1{{font-size:20px;margin:0 0 4px}}
+  .sub{{color:#666;font-size:13px;margin:0 0 20px}}
+  .stats{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}}
+  .stat{{flex:1;min-width:110px;background:#f9f9f9;border-radius:6px;padding:14px;text-align:center}}
+  .stat .num{{font-size:28px;font-weight:700;line-height:1}}
+  .stat .lbl{{font-size:11px;color:#888;margin-top:4px;text-transform:uppercase;letter-spacing:.05em}}
+  .sec-title{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+              color:#888;margin:20px 0 8px;border-bottom:1px solid #eee;padding-bottom:5px}}
+  table{{width:100%;border-collapse:collapse;font-size:13px}}
+  td{{padding:6px 4px;border-bottom:1px solid #f0f0f0;vertical-align:top}}
+  td:first-child{{color:#555;padding-right:16px}}
+  .footer{{font-size:11px;color:#aaa;margin-top:20px;text-align:center}}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>&#128235; Archive Run Report{dry_label}</h1>
+  <p class="sub">{date_str} &nbsp;&middot;&nbsp; {time_str} &nbsp;&middot;&nbsp; {report_to}</p>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="num" style="color:#c0392b">{archived}</div>
+      <div class="lbl">Archived</div>
+    </div>
+    <div class="stat">
+      <div class="num" style="color:#2e7d32">{kept}</div>
+      <div class="lbl">Kept</div>
+    </div>
+    <div class="stat">
+      <div class="num">{archived + kept}</div>
+      <div class="lbl">Scanned</div>
+    </div>
+    <div class="stat">
+      <div class="num">{dur_str}</div>
+      <div class="lbl">Duration</div>
+    </div>
+  </div>
+
+  <div class="sec-title">Run settings</div>
+  <table>
+    <tr><td>Inbox</td><td><code style="font-size:12px">{args.inbox}</code></td></tr>
+    <tr><td>Archive</td><td><code style="font-size:12px">{args.archive_folder}</code></td></tr>
+    <tr><td>Days scanned</td><td>{args.days_back}</td></tr>
+    <tr><td>Mode</td><td>{'DRY RUN — no emails moved' if args.dry_run else 'Live — emails moved'}</td></tr>
+  </table>
+
+  <div class="sec-title">Classification breakdown</div>
+  <table>
+    <tr style="color:#888;font-size:11px">
+      <td><strong>Reason</strong></td>
+      <td style="text-align:right"><strong>Count</strong></td>
+    </tr>
+    {breakdown_rows}
+  </table>
+
+  <div class="footer">
+    archive_marketing.py v{__version__} &nbsp;&middot;&nbsp;
+    <a href="https://github.com/rodrigoazlima/scripts-archive-marketing">github.com/rodrigoazlima/scripts-archive-marketing</a>
+  </div>
+</div>
+</body>
+</html>"""
+
+    subject = f"[Archive Report] {archived} archived{dry_label} — {date_str}"
+    try:
+        _mcp_call(token, port, "sendMail", {
+            "to":         report_to,
+            "from":       sender_email,
+            "subject":    subject,
+            "body":       html,
+            "isHtml":     True,
+            "skipReview": True,
+        })
+        print(f"[report] Report sent to {report_to}", flush=True)
+    except Exception as exc:
+        print(f"[report] Failed to send email report: {exc}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -724,6 +889,7 @@ def run(args: argparse.Namespace) -> None:
         args: Merged configuration namespace (CLI + env + config file).
     """
     token, port = load_connection(args.connection_file)
+    run_start = time.time()
 
     # Compile user exclude patterns
     exclude_patterns: List[re.Pattern] = []
@@ -861,7 +1027,11 @@ def run(args: argparse.Namespace) -> None:
         if csv_fh:
             csv_fh.close()
 
+    run_duration = time.time() - run_start
     _print_summary(total_archived, total_kept, reason_counts, args.dry_run, args.export_csv)
+
+    if getattr(args, "send_report", False):
+        send_report_email(token, port, args, total_archived, total_kept, reason_counts, run_duration)
 
 
 def _print_summary(
@@ -933,6 +1103,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Dry run with only the final summary printed (quiet mode).")
     p.add_argument("--verbose", "-v",   action="store_true",
                    help="Print every classification decision.")
+    p.add_argument("--send-report",     action="store_true", default=DEFAULTS["send_report"],
+                   help="Send an HTML email summary report after each run.")
+    p.add_argument("--report-to",       metavar="EMAIL", default=DEFAULTS["report_to"],
+                   help="Recipient for the report email (default: auto-detect from Thunderbird).")
     return p
 
 

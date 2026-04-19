@@ -25,6 +25,7 @@ Uses the [thunderbird-mcp](https://github.com/joelpurra/thunderbird-mcp) bridge 
 - 🌿 **Env var support** — override any setting via environment variables
 - 🚫 **Exclude list** — `--exclude` flag to always keep specific senders/patterns
 - 📊 **CSV export** — log every classification decision to a file
+- 📨 **Email report** — auto-send yourself an HTML summary after each run
 - 🧪 **Tested** — 40 unit tests covering all classification rules
 
 ---
@@ -119,7 +120,9 @@ Copy `config.example.json` to `~/.config/archive_marketing/config.json`:
   "exclude": [
     "payroll@mycompany.com",
     "boss@mycompany.com"
-  ]
+  ],
+  "send_report": true,
+  "report_to":   "you@gmail.com"
 }
 ```
 
@@ -135,6 +138,8 @@ Copy `config.example.json` to `~/.config/archive_marketing/config.json`:
 | `ARCHIVE_MOVE_DELAY` | Seconds between move calls |
 | `ARCHIVE_START_OFFSET` | Resume from offset |
 | `ARCHIVE_DAYS_BACK` | How many days back to scan |
+| `ARCHIVE_SEND_REPORT` | `true`/`false` — send email report after run |
+| `ARCHIVE_REPORT_TO` | Recipient email for the report (default: auto from Thunderbird) |
 
 ### All CLI flags
 
@@ -155,6 +160,8 @@ options:
   --export-csv PATH      Write all decisions to a CSV file
   --dry-run              Classify only — do not move emails
   --dry-run-summary      Dry run, print only final summary
+  --send-report          Send HTML email report after each run
+  --report-to EMAIL      Report recipient (default: auto-detect from Thunderbird)
   --verbose, -v          Print every classification decision
   -h, --help             Show help
 ```
