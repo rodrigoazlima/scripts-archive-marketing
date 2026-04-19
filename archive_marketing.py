@@ -42,7 +42,7 @@ import sys
 import time
 import urllib.request
 import urllib.error
-from datetime import datetime
+from datetime import date as date_type, datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -52,7 +52,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 # ---------------------------------------------------------------------------
 # Default configuration
@@ -75,6 +75,8 @@ DEFAULTS: Dict = {
     "dry_run_summary": False,
     "export_csv":      None,
     "exclude":         [],
+    "date_from":       None,
+    "date_to":         None,
     "send_report":          False,
     "report_to":            None,
     "skip_report_if_empty":    True,
@@ -383,6 +385,46 @@ WEAK_SUBJECT = re.compile(r"""
     \bdiscover\b    | \bexplore\b  |
     fastest\s+way   | popular\s+ways | next\s+answer
 """, re.IGNORECASE | re.VERBOSE)
+
+
+# ---------------------------------------------------------------------------
+# Date parsing helpers
+# ---------------------------------------------------------------------------
+
+def _parse_email_date(msg: Dict) -> Optional[datetime]:
+    """
+    Extract the received date from an MCP message dict.
+
+    Tries common field names returned by thunderbird-mcp and handles both
+    Unix timestamps (seconds or milliseconds) and ISO string formats.
+    Returns None if no date field is found or parseable.
+    """
+    for field in ("date", "dateReceived", "receivedAt", "Date", "received"):
+        val = msg.get(field)
+        if val is None:
+            continue
+        if isinstance(val, (int, float)):
+            # Distinguish ms from s: timestamps after year 2001 in ms > 1e12
+            ts = val / 1000 if val > 1e10 else val
+            try:
+                return datetime.fromtimestamp(ts)
+            except (OSError, OverflowError, ValueError):
+                continue
+        if isinstance(val, str):
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+                        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(val[:26].rstrip("Z"), fmt)
+                except ValueError:
+                    continue
+    return None
+
+
+def _date_arg(s: str) -> date_type:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid date '{s}' — use YYYY-MM-DD")
 
 
 # ---------------------------------------------------------------------------
@@ -1005,6 +1047,18 @@ def run(args: argparse.Namespace) -> None:
     token, port = load_connection(args.connection_file)
     run_start = time.time()
 
+    # Date range: auto-compute days_back to reach date_from
+    date_from_dt: Optional[datetime] = (
+        datetime.combine(args.date_from, datetime.min.time()) if args.date_from else None
+    )
+    date_to_dt: Optional[datetime] = (
+        datetime.combine(args.date_to, datetime.max.time()) if args.date_to else None
+    )
+    if date_from_dt:
+        days_needed = (datetime.now().date() - args.date_from).days + 1
+        if days_needed > args.days_back:
+            args.days_back = days_needed
+
     # Compile user exclude patterns
     exclude_patterns: List[re.Pattern] = []
     for pat in (args.exclude or []):
@@ -1037,6 +1091,10 @@ def run(args: argparse.Namespace) -> None:
         print(f"  Inbox  : {args.inbox}")
         print(f"  Archive: {args.archive_folder}")
         print(f"  Offset : {offset}  |  Page: {args.page_size}  |  Delay: {args.fetch_delay}s")
+        if args.date_from or args.date_to:
+            from_s = str(args.date_from) if args.date_from else "beginning"
+            to_s   = str(args.date_to)   if args.date_to   else "today"
+            print(f"  Range  : {from_s} → {to_s}")
         if exclude_patterns:
             print(f"  Exclude: {len(exclude_patterns)} pattern(s)")
         print(f"{'='*62}\n")
@@ -1077,11 +1135,22 @@ def run(args: argparse.Namespace) -> None:
             # Classify
             marketing_ids: List[str] = []
             ts = datetime.now().isoformat(timespec="seconds")
+            skipped_date = 0
 
             for email in emails:
                 sender  = email.get("author", "")
                 subject = email.get("subject", "")
                 mid     = email.get("id", "")
+
+                if date_from_dt or date_to_dt:
+                    email_dt = _parse_email_date(email)
+                    if email_dt is not None:
+                        if date_to_dt and email_dt > date_to_dt:
+                            skipped_date += 1
+                            continue
+                        if date_from_dt and email_dt < date_from_dt:
+                            skipped_date += 1
+                            continue
 
                 is_mkt, reason = classify(sender, subject, exclude_patterns)
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
@@ -1103,9 +1172,10 @@ def run(args: argparse.Namespace) -> None:
                     if args.verbose and not args.dry_run_summary:
                         print(f"    ✓ [{reason:<30}] {sender[:40]:<40}  {subject[:45]}")
 
-            kept = len(emails) - len(marketing_ids)
+            kept = len(emails) - len(marketing_ids) - skipped_date
             if not args.dry_run_summary:
-                print(f"         Marketing: {len(marketing_ids):<4}  Keeping: {kept}", flush=True)
+                skip_str = f"  Skipped(date): {skipped_date}" if skipped_date else ""
+                print(f"         Marketing: {len(marketing_ids):<4}  Keeping: {kept}{skip_str}", flush=True)
 
             # Archive
             if marketing_ids and not args.dry_run:
@@ -1223,6 +1293,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Skip first N emails (resume support).")
     p.add_argument("--days-back",       type=int,   default=DEFAULTS["days_back"],
                    help="How many days back to scan.")
+    p.add_argument("--date-from",        metavar="YYYY-MM-DD", type=_date_arg, default=None,
+                   help="Only process emails on or after this date. Auto-adjusts --days-back.")
+    p.add_argument("--date-to",          metavar="YYYY-MM-DD", type=_date_arg, default=None,
+                   help="Only process emails on or before this date.")
     p.add_argument("--exclude",         metavar="REGEX", action="append", default=[],
                    help="Regex pattern: matching sender/subject always kept. Repeatable.")
     p.add_argument("--export-csv",      metavar="PATH",
