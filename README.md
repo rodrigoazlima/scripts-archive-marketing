@@ -1,5 +1,6 @@
 # 📬 Thunderbird Inbox Marketing Archiver
 
+[![Version](https://img.shields.io/badge/version-1.2.0-blue)](archive_marketing.py)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License: GNU](https://img.shields.io/badge/License-GNUv3-blue.svg)](LICENSE)
 [![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](archive_marketing.py)
@@ -246,7 +247,7 @@ scripts-archive-marketing/
 │   ├── workflows/ci.yml       # GitHub Actions CI
 │   └── ISSUE_TEMPLATE/        # Bug report & feature request templates
 ├── README.md
-├── LICENSE                    # GPL v3
+├── LICENSE                    # GNU v3
 └── .gitignore
 ```
 
@@ -375,13 +376,12 @@ Ideas:
 - 🌐 Marketing patterns for more languages/regions (Spanish, French, German…)
 - 📧 Support multiple inboxes in one run
 - 🔄 Rollback support (move back from archive to inbox)
-- 📈 HTML/JSON summary reports
 
 ---
 
 ## 📄 License
 
-[GPL v3](LICENSE) — free to use, modify, and distribute.
+[GNU v3](LICENSE) — free to use, modify, and distribute.
 
 ---
 
