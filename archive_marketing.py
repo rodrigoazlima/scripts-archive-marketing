@@ -731,6 +731,47 @@ def open_csv_writer(path: str):
 _REPORT_SUBJECT_PREFIX = "[Archive Report]"
 
 
+def ensure_reports_folder(token: str, port: int, reports_folder: str) -> bool:
+    """
+    Ensure reports_folder exists in Thunderbird. Lists subfolders of the parent
+    and creates the folder if not found.
+
+    Args:
+        token:          MCP auth token.
+        port:           MCP bridge port.
+        reports_folder: Full IMAP URI of the desired reports folder.
+
+    Returns:
+        True if folder exists or was created, False on failure.
+    """
+    parts = reports_folder.rsplit("/", 1)
+    if len(parts) != 2 or not parts[1]:
+        print(f"[cleanup] Cannot parse reports_folder URI: {reports_folder}", flush=True)
+        return False
+
+    parent_uri, folder_name = parts
+
+    try:
+        result = _mcp_call(token, port, "listFolders", {"folderPath": parent_uri})
+        folders = result if isinstance(result, list) else result.get("folders", [])
+        existing = {f.get("name", "") for f in folders}
+        if folder_name in existing:
+            return True
+    except Exception as exc:
+        print(f"[cleanup] listFolders failed: {exc}", flush=True)
+
+    try:
+        _mcp_call(token, port, "createFolder", {
+            "parentFolderPath": parent_uri,
+            "name": folder_name,
+        })
+        print(f"[cleanup] Created reports folder: {reports_folder}", flush=True)
+        return True
+    except Exception as exc:
+        print(f"[cleanup] Failed to create reports folder: {exc}", flush=True)
+        return False
+
+
 def cleanup_prev_reports(
     token: str,
     port: int,
@@ -1110,7 +1151,8 @@ def run(args: argparse.Namespace) -> None:
             if getattr(args, "cleanup_prev_reports", True):
                 rf = getattr(args, "reports_folder", None)
                 if rf:
-                    cleanup_prev_reports(token, port, args.inbox, rf, args.move_batch)
+                    if ensure_reports_folder(token, port, rf):
+                        cleanup_prev_reports(token, port, args.inbox, rf, args.move_batch)
                 else:
                     print(
                         "[cleanup] cleanup_prev_reports enabled but reports_folder not set — skipping.",
